@@ -61,6 +61,21 @@ FFPROBE = _find_ffmpeg_bin("ffprobe")
 # Step 1 - Discover subtitle tracks
 # ---------------------------------------------------------------------------
 
+def get_audio_tracks(video_path: str) -> list[dict]:
+    """Return a list of audio stream info dicts from the video file."""
+    result = subprocess.run(
+        [FFPROBE, "-v", "error",
+         "-select_streams", "a",
+         "-show_entries", "stream=index,codec_name,channels,sample_rate",
+         "-show_entries", "stream_tags=language,title",
+         "-of", "json",
+         video_path],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout)
+    return data.get("streams", [])
+
+
 def get_subtitle_tracks(video_path: str) -> list[dict]:
     """Return a list of subtitle stream info dicts from the video file."""
     result = subprocess.run(
@@ -293,15 +308,15 @@ def assemble_tts_track(events: list[dict], sapi,
 # ---------------------------------------------------------------------------
 
 def mix_audio_tracks(original_video: str, tts_wav_path: str,
-                     tmpdir: str) -> str:
+                     tmpdir: str, audio_stream_index: int = 0) -> str:
     """Extract original audio, mix with TTS in numpy, return path to mixed WAV."""
     # Extract original audio to WAV
     orig_wav = os.path.join(tmpdir, "original_audio.wav")
-    print("  Extracting original audio...")
+    print(f"  Extracting audio stream 0:a:{audio_stream_index}...")
     subprocess.run(
         [FFMPEG, "-y", "-v", "error",
          "-i", original_video,
-         "-map", "0:a:0",
+         "-map", f"0:a:{audio_stream_index}",
          "-ar", str(SAMPLE_RATE),  # resample to match TTS
          "-ac", "1",               # downmix to mono for mixing
          orig_wav],
@@ -335,10 +350,12 @@ def mix_audio_tracks(original_video: str, tts_wav_path: str,
 
 
 def mux_tts_track(video_path: str, tts_audio_path: str, output_path: str,
-                  tmpdir: str, track_name: str = "English (TTS)"):
+                  tmpdir: str, audio_stream_index: int = 0,
+                  track_name: str = "English (TTS)"):
     """Pre-encode all audio tracks, then mux with pure -c copy."""
     # Create mixed track
-    mixed_wav = mix_audio_tracks(video_path, tts_audio_path, tmpdir)
+    mixed_wav = mix_audio_tracks(video_path, tts_audio_path, tmpdir,
+                                audio_stream_index)
 
     # Encode both new tracks to AAC
     mixed_aac = os.path.join(tmpdir, "mixed.m4a")
@@ -397,12 +414,16 @@ def main():
                         help="TTS voice name substring (e.g. 'David', 'Zira'). Default: system default.")
     parser.add_argument("-r", "--rate", type=int, default=175,
                         help="TTS speech rate in words per minute (default: 175).")
+    parser.add_argument("-a", "--audio", type=int, default=None,
+                        help="Audio track number to mix TTS over (0-based). Default: first track.")
     parser.add_argument("-s", "--sub-index", type=int, default=None,
                         help="Subtitle stream index to use. Default: auto-pick largest track.")
     parser.add_argument("--track-name", default="English (TTS)",
                         help="Name for the new audio track (default: 'English (TTS)').")
     parser.add_argument("--list-voices", action="store_true",
                         help="List available TTS voices and exit.")
+    parser.add_argument("--list-tracks", action="store_true",
+                        help="List audio and subtitle tracks and exit.")
 
     args = parser.parse_args()
 
@@ -417,6 +438,25 @@ def main():
         print(f"Error: file not found: {input_path}")
         sys.exit(1)
 
+    if args.list_tracks:
+        audio_tracks = get_audio_tracks(input_path)
+        sub_tracks = get_subtitle_tracks(input_path)
+        print("Audio tracks:")
+        for i, t in enumerate(audio_tracks):
+            lang = t.get("tags", {}).get("language", "?")
+            title = t.get("tags", {}).get("title", "")
+            codec = t.get("codec_name", "?")
+            label = f"{title} " if title else ""
+            print(f"  {i}: {label}[{lang}] ({codec})")
+        print("\nSubtitle tracks:")
+        for i, t in enumerate(sub_tracks):
+            lang = t.get("tags", {}).get("language", "?")
+            title = t.get("tags", {}).get("title", "")
+            nf = t.get("tags", {}).get("NUMBER_OF_FRAMES", "?")
+            label = f"{title} " if title else ""
+            print(f"  {i} (stream {t['index']}): {label}[{lang}] ({nf} events)")
+        return
+
     if args.output:
         output_path = args.output
     else:
@@ -426,8 +466,24 @@ def main():
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
 
+    # -- Discover audio tracks --
+    print("\n[1/4] Discovering tracks...")
+    audio_tracks = get_audio_tracks(input_path)
+    if not audio_tracks:
+        print("Error: no audio tracks found in the video file.")
+        sys.exit(1)
+
+    audio_idx = args.audio if args.audio is not None else 0
+    if audio_idx >= len(audio_tracks):
+        print(f"Error: audio track {audio_idx} does not exist (file has {len(audio_tracks)} audio tracks).")
+        sys.exit(1)
+
+    a = audio_tracks[audio_idx]
+    a_lang = a.get("tags", {}).get("language", "?")
+    a_title = a.get("tags", {}).get("title", "")
+    print(f"  Mixing TTS over audio track {audio_idx}: {a_title + ' ' if a_title else ''}[{a_lang}]")
+
     # -- Discover subtitles --
-    print("\n[1/4] Discovering subtitle tracks...")
     tracks = get_subtitle_tracks(input_path)
     if not tracks:
         print("Error: no subtitle tracks found in the video file.")
@@ -459,7 +515,8 @@ def main():
 
         # -- Mux --
         print(f"\n[4/4] Muxing TTS track into output file...")
-        mux_tts_track(input_path, tts_wav_path, output_path, tmpdir, args.track_name)
+        mux_tts_track(input_path, tts_wav_path, output_path, tmpdir,
+                      audio_idx, args.track_name)
 
     print(f"\nDone! Output written to: {output_path}")
 
