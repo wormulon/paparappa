@@ -16,8 +16,18 @@ set "ALL_GOOD=1"
 :: -------------------------------------------
 echo [1/4] Checking Python...
 
+set "PYTHON="
 python --version >nul 2>&1
-if errorlevel 1 (
+if not errorlevel 1 (
+    set "PYTHON=python"
+) else (
+    py --version >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON=py"
+    )
+)
+
+if not defined PYTHON (
     echo   [FAIL] Python is not installed or not on PATH.
     echo   Please install Python 3.10+ from https://www.python.org/downloads/
     echo   Make sure to check "Add Python to PATH" during install.
@@ -25,7 +35,7 @@ if errorlevel 1 (
     goto :summary
 )
 
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set "PY_VER=%%v"
+for /f "tokens=2 delims= " %%v in ('!PYTHON! --version 2^>^&1') do set "PY_VER=%%v"
 for /f "tokens=1,2 delims=." %%a in ("!PY_VER!") do (
     set "PY_MAJOR=%%a"
     set "PY_MINOR=%%b"
@@ -42,7 +52,7 @@ if !PY_MAJOR! EQU 3 if !PY_MINOR! LSS 10 (
     goto :summary
 )
 
-echo   [OK] Python !PY_VER!
+echo   [OK] Python !PY_VER! (via !PYTHON!^)
 
 :: -------------------------------------------
 :: 2. Check / Install ffmpeg
@@ -93,7 +103,7 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
     echo   [OK] venv exists at .venv\
 ) else (
     echo   Creating virtual environment...
-    python -m venv "%VENV_DIR%"
+    !PYTHON! -m venv "%VENV_DIR%"
     if errorlevel 1 (
         echo   [FAIL] Could not create virtual environment.
         set "ALL_GOOD=0"
