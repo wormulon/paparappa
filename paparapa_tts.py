@@ -91,6 +91,9 @@ def get_subtitle_tracks(video_path: str) -> list[dict]:
     return data.get("streams", [])
 
 
+BITMAP_SUB_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+
+
 def pick_subtitle_track(tracks: list[dict]) -> int:
     """Pick the subtitle track with the most frames (biggest = full dialogue)."""
     best_index = tracks[0]["index"]
@@ -119,8 +122,8 @@ def get_video_duration(video_path: str) -> float:
 # ---------------------------------------------------------------------------
 
 def extract_subtitles(video_path: str, stream_index: int, tmpdir: str) -> str:
-    """Extract a subtitle stream to an ASS file, return its path."""
-    out_path = os.path.join(tmpdir, "subs.ass")
+    """Extract a subtitle stream to an SRT file, return its path."""
+    out_path = os.path.join(tmpdir, "subs.srt")
     subprocess.run(
         [FFMPEG, "-y", "-v", "error",
          "-i", video_path,
@@ -243,7 +246,8 @@ def fit_clip_samples(samples: np.ndarray, window_ms: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def assemble_tts_track(events: list[dict], sapi,
-                       total_duration_ms: int, tmpdir: str) -> str:
+                       total_duration_ms: int, tmpdir: str,
+                       volume: int = 100) -> str:
     """
     Generate TTS for every subtitle event and place each clip at its
     correct timestamp on a numpy int32 canvas. Overlapping clips are summed
@@ -284,7 +288,8 @@ def assemble_tts_track(events: list[dict], sapi,
         start_sample = int(SAMPLE_RATE * start_ms / 1000)
         end_sample = min(start_sample + len(samples), total_samples)
         clip_len = end_sample - start_sample
-        canvas[start_sample:end_sample] += samples[:clip_len].astype(np.int32)
+        scaled = (samples[:clip_len].astype(np.int32) * volume) // 100
+        canvas[start_sample:end_sample] += scaled
 
         os.remove(clip_path)
 
@@ -414,10 +419,12 @@ def main():
                         help="TTS voice name substring (e.g. 'David', 'Zira'). Default: system default.")
     parser.add_argument("-r", "--rate", type=int, default=175,
                         help="TTS speech rate in words per minute (default: 175).")
+    parser.add_argument("--volume", type=int, default=100,
+                        help="TTS volume as a percentage (default: 100). 50 = half, 200 = double.")
     parser.add_argument("-a", "--audio", type=int, default=None,
                         help="Audio track number to mix TTS over (0-based). Default: first track.")
     parser.add_argument("-s", "--sub-index", type=int, default=None,
-                        help="Subtitle stream index to use. Default: auto-pick largest track.")
+                        help="Subtitle track number to use (0-based). Default: auto-pick largest track.")
     parser.add_argument("--track-name", default="English (TTS)",
                         help="Name for the new audio track (default: 'English (TTS)').")
     parser.add_argument("--list-voices", action="store_true",
@@ -463,7 +470,7 @@ def main():
         p = Path(input_path)
         output_path = str(p.with_stem(p.stem + "_tts"))
 
-    print(f"Input:  {input_path}")
+    print(f"Input:  {Path(input_path)}")
     print(f"Output: {output_path}")
 
     # -- Discover audio tracks --
@@ -484,13 +491,23 @@ def main():
     print(f"  Mixing TTS over audio track {audio_idx}: {a_title + ' ' if a_title else ''}[{a_lang}]")
 
     # -- Discover subtitles --
-    tracks = get_subtitle_tracks(input_path)
-    if not tracks:
+    all_tracks = get_subtitle_tracks(input_path)
+    if not all_tracks:
         print("Error: no subtitle tracks found in the video file.")
         sys.exit(1)
 
+    tracks = [t for t in all_tracks if t.get("codec_name") not in BITMAP_SUB_CODECS]
+    if not tracks:
+        print("Error: only bitmap (image-based) subtitle tracks found.")
+        print("  TTS requires text-based subtitles (SRT, ASS, etc.).")
+        print("  Use --list-tracks to see what's in the file.")
+        sys.exit(1)
+
     if args.sub_index is not None:
-        sub_index = args.sub_index
+        if args.sub_index >= len(tracks):
+            print(f"Error: subtitle track {args.sub_index} does not exist (file has {len(tracks)} text subtitle tracks).")
+            sys.exit(1)
+        sub_index = tracks[args.sub_index]["index"]
     else:
         sub_index = pick_subtitle_track(tracks)
 
@@ -510,7 +527,7 @@ def main():
         # -- Generate TTS --
         print(f"\n[3/4] Generating TTS audio (voice={args.voice or 'default'}, rate={args.rate})...")
         sapi = create_sapi_voice(args.voice, args.rate)
-        tts_wav_path = assemble_tts_track(events, sapi, duration_ms, tmpdir)
+        tts_wav_path = assemble_tts_track(events, sapi, duration_ms, tmpdir, args.volume)
         print(f"  TTS track: {os.path.getsize(tts_wav_path) / 1024 / 1024:.1f} MB")
 
         # -- Mux --

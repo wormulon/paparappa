@@ -97,7 +97,7 @@ The tool will process the video and save a new file with `_tts` added to the nam
 | `-r` / `--rate` | Speech speed in words per minute | `175` |
 | `-o` / `--output` | Output file path | `<input>_tts.mkv` |
 | `-a` / `--audio` | Which audio track to mix TTS over (0-based) | `0` (first track) |
-| `-s` / `--sub-index` | Which subtitle track to use (by stream index) | Auto-picks the largest track |
+| `-s` / `--sub-index` | Which subtitle track to use (0-based) | Auto-picks the largest track |
 | `--track-name` | Label for the new audio tracks in the output | `English (TTS)` |
 | `--list-voices` | Show available TTS voices and exit | |
 | `--list-tracks` | Show audio and subtitle tracks in the video and exit | |
